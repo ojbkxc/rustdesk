@@ -20,6 +20,8 @@ on:
 jobs:
   run-ci:
     uses: ./.github/workflows/flutter-build.yml
+    # fork: 继承 repo secrets 使 Android Sign 步骤生效（官方 CI 仅验证编译不签名，本 fork 需要 CI 产出可直接安装的签名 APK）
+    secrets: inherit
     with:
       upload-artifact: false
     permissions:
