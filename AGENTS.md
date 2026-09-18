@@ -1,166 +1,107 @@
-# RustDesk Guide
+# AGENTS.md — RustDesk (ojbkxc fork)
 
-## Project Layout
+> 给 AI 编码代理的仓库指南。规则分三级：**Never(禁止) / Ask first(先问) / 默认自主**。
+> 每条硬规则都对应真实踩过的坑，不要试图绕过。
+> 本文件在官方 AGENTS.md（上游 RustDesk 代理规则）基础上叠加本仓库的私有开发纪律；
+> 官方的 Rust/Tokio/最小 diff/翻译规则继续有效，冲突时以本文件为准。
 
-### Directory Structure
-* `src/` Rust app
-* `src/server/` audio / clipboard / input / video / network
-* `src/platform/` platform-specific code
-* `src/ui/` legacy Sciter UI (deprecated)
-* `flutter/` current UI
-* `libs/hbb_common/` shared with the server: rendezvous proto, sockets, `Config` core
-* `libs/base/` (crate `base`) client-only: option keys, message proto, file transfer, platform code
-* `libs/scrap/` screen capture
-* `libs/enigo/` input control
-* `libs/clipboard/` clipboard
-* `libs/base/src/config/keys.rs` the single import path for all options
+## 0. 项目速览(新会话必读)
 
-### Key Components
-- **Remote Desktop Protocol**: Custom protocol implemented in `src/rendezvous_mediator.rs` for communicating with rustdesk-server
-- **Screen Capture**: Platform-specific screen capture in `libs/scrap/`
-- **Input Handling**: Cross-platform input simulation in `libs/enigo/`
-- **Audio/Video Services**: Real-time audio/video streaming in `src/server/`
-- **File Transfer**: Secure file transfer implementation in `libs/base/src/fs.rs`
+**RustDesk** 是开源远程桌面客户端（Rust 核心 + Flutter UI），本仓库是
+**ojbkxc/rustdesk** —— 基于官方 `rustdesk/rustdesk` master（1.5.0 开发线）的二次开发 fork。
 
-`hbb_common` is a git submodule shared with the server, so changing it costs a
-round-trip. Put client-only code in `libs/base` instead; it is a normal
-workspace member. `base::config::keys` re-exports the handful of keys
-`hbb_common` still reads, so callers get the whole set from that one path.
+- **仓库**：https://github.com/ojbkxc/rustdesk（fork，master 分支，直接 push，不走 PR）
+- **上游**：https://github.com/rustdesk/rustdesk（upstream remote 已配置，用于同步官方）
+- **基线**：master 跟随官方 1.5.0 开发线（Cargo.toml `version = "1.5.0"`）
+- **服务端**：hbbs/hbbr 用官方 `rustdesk/rustdesk-server` OSS 版或 lejianwen fork（forapi 分支），
+  配套 API 服务器 `lejianwen/rustdesk-api`（源码在 `D:\GitHub\rust\rustdesk-api-master\`）
+- **代码结构**：
+  - `src/` Rust 核心（连接/会话/服务端内 audio/video/input/clipboard）
+  - `flutter/` 当前 UI（Dart），`src/ui/` 是已废弃的 Sciter UI
+  - `libs/hbb_common/` **git submodule**，与服务端共享（rendezvous proto、Config）
+  - `libs/base/` 客户端专属代码（option keys、消息 proto、文件传输）
+  - `libs/scrap/` 截屏；`libs/enigo/` 输入模拟；`libs/clipboard/` 剪贴板
+  - `src/lang/*.rs` 各语言翻译（`template.rs` 是主键列表，**永不编辑**）
 
-### UI Architecture
-- **Legacy UI**: Sciter-based (deprecated) - files in `src/ui/`
-- **Modern UI**: Flutter-based - files in `flutter/`
-  - Desktop: `flutter/lib/desktop/`
-  - Mobile: `flutter/lib/mobile/`
-  - Shared: `flutter/lib/common/` and `flutter/lib/models/`
+## 1. Never(硬性禁止，违反即返工)
 
-## Rust Rules
+1. **禁止本地编译**。不运行 `cargo build` / `cargo check` / `cargo clippy` / `cargo test` /
+   `build.py` / 任何 Flutter 构建命令。本机没有 vcpkg + Flutter + Rust toolchain 的完整验证
+   环境，本地结果不可信。**唯一编译验证是 GitHub Actions**（push 到 master 或手动 dispatch）。
+2. **禁止本地直接改 submodule**（`libs/hbb_common`）并让它脱离官方指向——改 submodule 指针
+   会导致 CI checkout 与本地不一致。客户端专属代码放 `libs/base`。
+3. **禁止为绕过 CI 而修改 workflow**（`.github/workflows/`）——除非任务就是修 CI 且用户明确要求。
+4. **禁止 `git add -A` / `git add .`**：只 add 自己本次改动的文件（可能存在并行会话的未提交改动）。
+5. **禁止单独编辑 `src/lang/template.rs`**（翻译工作只填各语言文件的空值）。
+6. **禁止把服务器地址、密钥、token 写进任何入库文件**；push 用 .git/config 内嵌 token
+   （已配置），严禁回显含 token 的 URL。
+7. **禁止合并 upstream/master 进本仓库 master**——官方 master 每天几十个 commit，
+   混入会引入大量未经审查的变更。同步官方走 explicit 的 `git fetch upstream` + 挑选
+   `git cherry-pick <tag 范围>`，且同步前必须问用户。
 
-* Avoid `unwrap()` / `expect()` in production code.
-* Exceptions:
+## 2. CI 结构（编译验证的唯一途径）
 
-  * tests;
-  * lock acquisition where failure means poisoning, not normal control flow.
-* Otherwise prefer `Result` + `?` or explicit handling.
-* Do not ignore errors silently.
-* Avoid unnecessary `.clone()`.
-* Prefer borrowing when practical.
-* Do not add dependencies unless needed.
-* Keep code simple and idiomatic.
+### 触发方式
 
-## Tokio Rules
+| Workflow | 触发 | 用途 |
+|---|---|---|
+| `ci.yml` | push master（忽略 docs/README/res 等路径）+ workflow_dispatch | Rust 库编译验证（x86_64-linux matrix job），**最快信号** |
+| `flutter-ci.yml` | push master + workflow_dispatch | 全平台 Flutter 构建矩阵（Windows/macOS/Linux/Android/iOS/Web），最重 |
+| `flutter-build.yml` | 被上面两个 `uses:` 的可复用 workflow | 实际构建逻辑，16 个 job |
+| `flutter-nightly.yml` / `flutter-tag.yml` | 定时 / tag | 产物发布，日常开发不碰 |
 
-* Assume a Tokio runtime already exists.
-* Never create nested runtimes.
-* Never call `Runtime::block_on()` inside Tokio / async code.
-* Do not hide runtime creation inside helpers or libraries.
-* Do not hold locks across `.await`.
-* Prefer `.await`, `tokio::spawn`, channels.
-* Use `spawn_blocking` or dedicated threads for blocking work.
-* Do not use `std::thread::sleep()` in async code.
+- **fork 仓库的 Actions 默认禁用**——push 空提交激活（已激活，total 11 个 workflow）。
+- 日常改 Rust 代码看 `CI`（单 job，~20 分钟内出结果）；改 Flutter/Dart 或发布前跑 `Full Flutter CI`。
+- `Full Flutter CI` 曾报 `startup_failure`：其矩阵含 `windows-11-arm`、`macos-15-intel` 等
+  runner label + macOS 签名 secrets（`MACOS_P12_*`）在 fork 中缺失。**允许给无关平台 job 加
+  `if: false` 或裁剪矩阵来让 CI 变绿**（仅限 job 级裁剪，不许动构建步骤本身），改 workflow 前先问用户。
+- Android/macOS 签名 job 在无 secrets 时会失败或产出未签名包，属预期，不算编译问题。
 
-## Editing Hygiene
+### CI 查询（本机无 gh CLI）
 
-* Change only what is required.
-* Prefer the smallest valid diff.
-* Do not refactor unrelated code.
-* Do not make formatting-only changes.
-* Keep naming/style consistent with nearby code.
+```
+curl -s "https://api.github.com/repos/ojbkxc/rustdesk/actions/runs?head_sha=<SHA>&per_page=5"
+```
 
-### Imports
+Token 从 `D:\GitHub\llm-proxy\.git\config` 的 remote URL 提取（或本仓库 .git/config）。
 
-* One `use` per crate. Everything a file takes from the same crate goes in a
-  single braced block, not one statement per item:
+## 3. 开发方法
 
-  ```rust
-  // no
-  use base::fs;
-  use base::message_proto::*;
+- **官方 AGENTS.md 规则全部继承**：最小 diff、纯增量优先（`#[cfg]`-gated 新块不动老代码）、
+  一个 crate 一条 `use`、注释只写为什么、手术式修改、回归面检查（改动收尾时列出所有
+  被改的既有文件并说明为何不可避免）。
+- **hbb_common 是 submodule**：改它会波及服务端，能放 `libs/base` 就放 `libs/base`。
+- **UI 改动 = Dart**（`flutter/lib/`），协议/连接层 = Rust（`src/`）。先想清楚改动归属层再动手。
+- **commit 信息**：conventional 前缀 + 中文/英文与历史一致（官方历史是英文，本仓库私有提交用中文）。
+- 提交前只做静态自检（读 diff 对照官方 AGENTS.md 规则），编译问题留给 CI。
 
-  // yes
-  use base::{fs, message_proto::*};
-  ```
+## 4. 自动迭代闭环
 
-* The only reason to split is a `#[cfg(...)]` that does not apply to the whole
-  block -- an attribute binds to one item, so a differently-gated import has to
-  stand on its own. A `pub use` re-export likewise cannot join a plain `use`.
+```
+理解任务 → 就绪判定 → 手术式实现 → push master → 盯 CI（绿=完成）
+              ↑                                  │
+              └──── 修根因，同一修复盲试 ≤2 次 ←── CI 红
+```
 
-  ```rust
-  #[cfg(not(feature = "flutter"))]
-  use base::fs;
-  use base::message_proto::*;
-  ```
+1. **就绪判定**：非平凡改动先写简短方案（目标/取舍/放弃项）再动手。
+2. **push 方式**：本仓库 origin 已内嵌 token，直接 `git push origin master`；
+   禁止交互式凭据管理器（无人值守会永久挂起）。
+3. **CI 失败处理**：只修根因；同一修复盲试不超过 2 次，仍红则停下报告并附 run URL。
+4. **不许宣称被阻塞**：限制是"从真实失败挣来的结论"；没实际尝试就说 "not attempted"。
+5. **结束卫生**：不留未提交改动；最终答复带 CI 结论或 commit SHA。
 
-* When splitting an existing `use` because some of its items moved to another
-  crate, fold each side into that crate's existing block rather than leaving a
-  second statement behind.
+## 5. Ask first(先问再做)
 
-### Comments
+- 同步官方更新（fetch upstream / cherry-pick 官方 tag / submodule bump）。
+- 动 `.github/workflows/`（含裁剪 job 矩阵让 fork CI 变绿）。
+- 升级 Rust/Flutter/vcpkg 版本（workflow env 里全部 pin 死，牵一发动全身）。
+- 新增 Rust crate / Dart package 依赖。
+- 改 `src/rendezvous_mediator.rs`（协议层，影响与服务端互通）。
+- 任何删除超过 100 行的批量清理。
 
-* Avoid comments unless they explain a non-obvious reason, constraint, or workaround.
-* Never restate what the code does; prefer clearer code instead.
-* If the code is self-explanatory, add no comment.
+## 6. 参考文件
 
-### Be minimally invasive
-
-* Prefer purely additive changes: layer new (`#[cfg]`-gated) blocks or new functions around existing code instead of restructuring it. The ideal diff for a fix adds lines and modifies/deletes none.
-* Do not extract or reshape existing code just to enable your new code; look for a mechanism that leaves existing lines untouched (e.g. hide/show an existing object instead of refactoring its construction into a helper for rebuilding).
-* Accept a little duplication over a restructure. A new function that repeats a few lines of an existing one is a better diff than reshaping the original so both can share it.
-* Put new logic in self-contained functions in the module it belongs to (platform-specific logic in `src/platform/`, with `use` inside the function body to avoid churning shared import blocks). Call sites in shared files (`src/tray.rs`, `src/core_main.rs`, `src/server/connection.rs`, …) should be thin one-line hooks.
-
-### Scope check before touching shared code
-
-* Before changing a shared trait, a shared struct, or the signature of a widely used function, check whether the bug or feature is specific to one path. If it is, keep the change inside that path unless that is impossible, and say in the PR why it was.
-* If an unrelated caller needs `Default::default()`, `None`, or another placeholder solely to satisfy a signature you changed, the diff is too broad: stop and redesign.
-* The expected shape of a fix is a new function in the feature's own module, plus at most a new field or a thin hook in the shared code it needs. Feature-specific state belongs beside the feature's existing state, not in a new abstraction every caller has to learn.
-
-### Mandatory regression-surface check
-
-Before considering any implementation complete, perform a minimization pass over the final diff.
-
-* Inspect every modified existing file and every modified existing code path. Each must be strictly necessary for the requested change. Revert changes that are merely cleanup, refactoring, consistency improvements, or fixes for pre-existing issues.
-* For new features, preserve the existing implementation path when the feature is disabled or unsupported whenever practical. `feature off` should run the old code, not a rewritten equivalent.
-* Do not route existing behavior through a new abstraction merely to share code with the new feature. Prefer a parallel new function or a small amount of duplication over changing a proven existing path.
-* Keep new implementation logic in new or feature-specific modules. Changes to shared/core files should normally be thin hooks, capability checks, or protocol plumbing.
-* Do not fix unrelated pre-existing bugs in the same PR. Put them in a separate change unless they directly block correctness or security of the requested work.
-* For submodule bumps, inspect the exact commit range and ensure unrelated changes are not being pulled into the parent PR.
-* Before finalizing, explicitly report the regression surface: list the existing files and existing runtime paths whose behavior changed, and explain why each change is unavoidable.
-* During review, treat an unnecessarily modified legacy path as a review finding even if tests pass and the rewritten behavior appears equivalent.
-
-## Reviewing a PR
-
-* Review only what the diff introduces. Verify ownership with `gh pr diff` before reporting a finding — if the offending lines are untouched context, it is a pre-existing problem, not this PR's.
-* List pre-existing problems in a separate section at the end, or leave out the ones that are not fatal. Never mix them into the findings the author has to fix.
-* Before re-reviewing, read the author's reply comments. Do not re-raise items they declined on scope grounds.
-* State a finding's consequence exactly: distinguish "the value is lost" from "the shortcut is inert but the value still saves".
-
-## Localization (`src/lang/*.rs`)
-
-Each file is a `HashMap<key, translation>`. Layout:
-
-* `template.rs` is the master list of every key. **Never edit it** as part of translation work.
-* `en.rs` holds only the keys whose English display text differs from the key itself.
-* Every other file (`de.rs`, `fr.rs`, …) carries the full key set; an untranslated entry has an empty value: `("key", "")`.
-* `it.rs` is maintained by hand by its translator. Never fill or change its entries; when adding new keys, append them to it with `""` and leave the translation to the maintainer.
-
-### Finding the English source for a key
-
-When filling an empty entry, determine the source English text with this rule:
-
-* If `key` exists in `en.rs` **with a non-empty value**, that value is the source text (look it up in `en.rs`).
-* Otherwise the **key string itself is the source text** (the key is already plain English).
-
-Then translate that source into the file's target language (infer the language from the file's existing non-empty entries / filename).
-
-### Translation hygiene
-
-* Only fill empty values. Never change keys, and never touch existing non-empty translations.
-* Preserve placeholders (`{}`) and escape sequences (`\n`, `\"`) exactly as in the source.
-* Do not translate brand or technical tokens: `RustDesk`, `Socks5`, `TLS`, `UAC`, `Wayland`, `X11`, `TCP`, `UDP`, `2FA`, `RDP`, `D3D`, etc.
-* Copy URL values (e.g. `doc_*` keys) verbatim from `en.rs`.
-
-### Adding new keys (feature work)
-
-* New English-text keys use sentence case, not Title Case: `Use ID whitelisting`, **not** `Use ID Whitelisting`. Acronyms (ID, IP, 2FA…) stay uppercase. Legacy Title-Case keys (e.g. `Use IP Whitelisting`) stay as-is — do not rename them.
-* Since the key itself is the English display text, a sentence-case key usually needs **no** `en.rs` entry; add one only when the display text must differ from the key (e.g. `*_tip` keys).
-* Append each new key to `template.rs` (with `""`) and to every `src/lang/*.rs` file (translated, or `""` if unsure; always `""` for `it.rs`), at the end of the list.
+- 官方代理规则（Rust/Tokio/最小 diff/翻译细则）：`AGENTS.md` 官方部分 / `GEMINI.md`
+- 构建细节：官方 `README.md` 与 `.github/workflows/flutter-build.yml`（各平台依赖、版本 pin）
+- 生态源码：`D:\GitHub\rust\rustdesk-api-master\`（lejianwen API 服务器）、
+  `D:\GitHub\rust\rustdesk-server-forapi\`（lejianwen fork 服务端）
