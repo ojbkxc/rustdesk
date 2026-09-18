@@ -2360,7 +2360,9 @@ pub fn read_custom_client(config: &str) {
         log::error!("Failed to decode custom client config");
         return;
     };
-    const KEY: &str = "5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=";
+    // fork 自签名 key：custom.txt 内容用本 fork 私有的 ed25519 私钥签发，
+    // 与官方 Custom Client Generator 的公钥解耦（官方私钥不公开，fork 无法签新配置）。
+    const KEY: &str = "GIgb+2Tnf7hUzqfEpyAcRbi2mz4UoojRhQxY1+D/QhA=";
     let Some(pk) = get_rs_pk(KEY) else {
         log::error!("Failed to parse public key of custom client");
         return;
