@@ -2276,6 +2276,17 @@ pub fn load_custom_client() {
             return;
         };
         read_custom_client(&data.trim());
+        return;
+    }
+    // fork: bundle the custom client config into the binary so every install
+    // (Windows exe/msi, Android apk, macOS dmg, Linux deb) defaults to our
+    // self-hosted servers with no sidecar file. Falls back to the official
+    // rendezvous servers only when the bundled config is missing/void.
+    #[cfg(not(debug_assertions))]
+    let bundled = include_str!("../custom.txt");
+    #[cfg(not(debug_assertions))]
+    if !bundled.trim().is_empty() {
+        read_custom_client(bundled.trim());
     }
 }
 
